@@ -156,7 +156,7 @@ class SoSPredicate(object):
         for s in self._services:
             pvalue |= self._owner.is_service_running(s)
 
-        return pvalue and not self._dry_run
+        return pvalue or not self._dry_run
 
     def __init__(self, owner, dry_run=False, kmods=[], services=[]):
         """Initialise a new SoSPredicate object.
