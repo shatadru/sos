@@ -243,6 +243,8 @@ def _parse_args(args):
                              "python debugger")
     parser.add_argument("--desc", "--description", type=str, action="store",
                         help="Description for a new preset", default="")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Run plugins but do not collect data")
     parser.add_argument("--experimental", action="store_true",
                         dest="experimental", default=False,
                         help="enable experimental plugins")
