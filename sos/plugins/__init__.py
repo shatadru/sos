@@ -282,6 +282,12 @@ class Plugin(object):
         '''Does the service $name exist on the system?'''
         return self.policy.init_system.is_service(name)
 
+    def is_service_running(self, name):
+        '''Return `True` if `service` is running on the system, or
+            `False` otherwise.
+        '''
+        return self.policy.init_system.is_running(name)
+
     def service_is_enabled(self, name):
         '''Is the service $name enabled?'''
         return self.policy.init_system.is_enabled(name)
