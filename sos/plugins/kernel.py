@@ -6,7 +6,9 @@
 #
 # See the LICENSE file in the source distribution for further information.
 
-from sos.plugins import Plugin, RedHatPlugin, DebianPlugin, UbuntuPlugin
+from sos.plugins import (
+    Plugin, RedHatPlugin, DebianPlugin, UbuntuPlugin, SoSPredicate
+)
 import os
 import glob
 import json
@@ -132,6 +134,10 @@ class Kernel(Plugin, RedHatPlugin, DebianPlugin, UbuntuPlugin):
             clocksource_path + "available_clocksource",
             clocksource_path + "current_clocksource"
         ])
+
+        i2c_i801_pred = SoSPredicate(self, kmods=["i2c_i801"])
+        self.add_cmd_output("ls -l /sys/bus/platform/drivers/i2c_designware",
+                            pred=i2c_i801_pred)
 
         if self.get_option("with-timer"):
             # This can be very slow, depending on the number of timers,
