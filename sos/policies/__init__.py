@@ -86,6 +86,14 @@ class InitSystem(object):
         """
         return name in self.services
 
+    def is_running(self, name):
+        """Checks if the given service name is running and returns a
+            boolena value, `True` if the service is running, and `False`
+            otherwise. This test is dependent on the configured query
+            command returning a zero exit status on success.
+        """
+        return _query_service(name) is not None
+
     def load_all_services(self):
         """This loads all services known to the init system into a dict.
         The dict should be keyed by the service name, and contain a dict of the
