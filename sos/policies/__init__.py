@@ -9,7 +9,6 @@ import fnmatch
 import tempfile
 import random
 import string
-from os import environ
 
 from sos.utilities import (ImporterHelper,
                            import_module,
@@ -385,11 +384,24 @@ class PresetDefaults(object):
         odict = self.opts.dict()
         pdict = {self.name: {DESC: self.desc, NOTE: self.note, OPTS: odict}}
 
+        if not os.path.exists(presets_path):
+            os.makedirs(presets_path, mode=0o755)
+
         with open(os.path.join(presets_path, self.name), "w") as pfile:
             json.dump(pdict, pfile)
 
     def delete(self, presets_path):
         os.unlink(os.path.join(presets_path, self.name))
+
+
+NO_PRESET = 'none'
+NO_PRESET_DESC = 'Do not load a preset'
+NO_PRESET_NOTE = 'Use to disable automatically loaded presets'
+
+GENERIC_PRESETS = {
+    NO_PRESET: PresetDefaults(name=NO_PRESET, desc=NO_PRESET_DESC,
+                              note=NO_PRESET_NOTE, opts=SoSOptions())
+    }
 
 
 class Policy(object):
@@ -435,6 +447,7 @@ No changes will be made to system configuration.
         self._valid_subclasses = []
         self.set_exec_path()
         self._host_sysroot = sysroot
+        self.register_presets(GENERIC_PRESETS)
 
     def get_valid_subclasses(self):
         return [IndependentPlugin] + self._valid_subclasses
@@ -552,7 +565,7 @@ No changes will be made to system configuration.
                 xz_version = self.package_manager\
                                  .all_pkgs()[xz_package]["version"]
             except Exception as e:
-                xz_version = [0]  # deal like xz version is really old
+                xz_version = [u'0']  # deal like xz version is really old
             if xz_version >= [u'5', u'2']:
                 cmd = "%s -T%d" % (cmd, threads)
         return cmd
@@ -613,7 +626,7 @@ No changes will be made to system configuration.
         self.commons = commons
 
     def _set_PATH(self, path):
-        environ['PATH'] = path
+        os.environ['PATH'] = path
 
     def set_exec_path(self):
         self._set_PATH(self.PATH)
@@ -717,7 +730,7 @@ No changes will be made to system configuration.
 
             :returns: a ``PresetDefaults`` object.
         """
-        return self.presets[""]
+        return self.presets[NO_PRESET]
 
     def load_presets(self, presets_path=None):
         """Load presets from disk.

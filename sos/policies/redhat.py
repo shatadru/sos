@@ -22,7 +22,6 @@ from sos import SoSOptions
 sys.path.insert(0, "/usr/share/rhn/")
 try:
     from up2date_client import up2dateAuth
-    from up2date_client import config
     from rhn import rpclib
 except ImportError:
     # might fail if non-RHEL
@@ -195,6 +194,9 @@ _opts_all_logs = SoSOptions(all_logs=True)
 _opts_all_logs_verify = SoSOptions(all_logs=True, verify=True)
 _opts_all_logs_no_lsof = SoSOptions(all_logs=True,
                                     plugopts=['process.lsof=off'])
+_cb_plugs = ['abrt', 'block', 'boot', 'dnf', 'dracut', 'filesys', 'grub2',
+             'hardware', 'host', 'kernel', 'logs', 'lvm2', 'memory', 'rpm',
+             'process', 'systemd', 'yum', 'xfs']
 
 RHEL_RELEASE_STR = "Red Hat Enterprise Linux"
 
@@ -212,6 +214,12 @@ RHOCP_DESC = "OpenShift Container Platform by Red Hat"
 
 RH_SATELLITE = "satellite"
 RH_SATELLITE_DESC = "Red Hat Satellite"
+SAT_OPTS = SoSOptions(verify=True, plugopts=['apache.log=on'])
+
+CB = "cantboot"
+CB_DESC = "For use when normal system startup fails"
+CB_OPTS = SoSOptions(verify=True, all_logs=True, onlyplugins=_cb_plugs)
+CB_NOTE = ("Data collection will be limited to a boot-affecting scope")
 
 NOTE_SIZE = "This preset may increase report size"
 NOTE_TIME = "This preset may increase report run time"
@@ -226,7 +234,8 @@ rhel_presets = {
     RHOCP: PresetDefaults(name=RHOCP, desc=RHOCP_DESC, note=NOTE_SIZE_TIME,
                           opts=_opts_all_logs_verify),
     RH_SATELLITE: PresetDefaults(name=RH_SATELLITE, desc=RH_SATELLITE_DESC,
-                                 note=NOTE_TIME, opts=_opts_verify),
+                                 note=NOTE_TIME, opts=SAT_OPTS),
+    CB: PresetDefaults(name=CB, desc=CB_DESC, note=CB_NOTE, opts=CB_OPTS)
 }
 
 # Legal disclaimer text for Red Hat products
@@ -281,7 +290,7 @@ support representative.
                 if line.startswith("NAME"):
                     (name, value) = line.split("=")
                     value = value.strip("\"'")
-                    if value.startswith(RHEL_RELEASE_STR):
+                    if value.startswith(cls.distro):
                         return True
         return False
 
@@ -297,13 +306,14 @@ support representative.
                 return 6
             elif pkgname[0] == "7":
                 return 7
+            elif pkgname[0] == "8":
+                return 8
         except Exception:
             pass
         return False
 
     def rhn_username(self):
         try:
-            # cfg = config.initUp2dateConfig()
             rhn_username = rpclib.xmlrpclib.loads(
                 up2dateAuth.getSystemId())[0][0]['username']
             return rhn_username.encode('utf-8', 'ignore')
@@ -323,6 +333,12 @@ support representative.
 
         # Vanilla RHEL is default
         return self.find_preset(RHEL)
+
+
+class CentOsPolicy(RHELPolicy):
+    distro = "CentOS"
+    vendor = "CentOS"
+    vendor_url = "http://www.centos.org/"
 
 
 ATOMIC = "atomic"
@@ -405,6 +421,12 @@ support representative.
         return self.find_preset(RHOCP)
 
 
+class CentOsAtomicPolicy(RedHatAtomicPolicy):
+    distro = "CentOS Atomic Host"
+    vendor = "CentOS"
+    vendor_url = "http://www.centos.org/"
+
+
 class FedoraPolicy(RedHatPolicy):
 
     distro = "Fedora"
@@ -424,6 +446,5 @@ class FedoraPolicy(RedHatPolicy):
         pkg = self.pkg_by_name("fedora-release") or \
             self.all_pkgs_by_name_regex("fedora-release-.*")[-1]
         return int(pkg["version"])
-
 
 # vim: set et ts=4 sw=4 :

@@ -69,24 +69,40 @@ class kubernetes(Plugin, RedHatPlugin):
 
         # get all namespaces in use
         kn = self.get_command_output('%s get namespaces' % kube_cmd)
-        knsps = [n.split()[0] for n in kn['output'].splitlines()[1:] if n]
+        # namespace is the 1st word on line, until the line has spaces only
+        kn_output = kn['output'].splitlines()[1:]
+        knsps = [n.split()[0] for n in kn_output if n and len(n.split())]
 
         resources = [
-            'limitrange',
+            'deployments',
+            'ingresses',
+            'limitranges',
             'pods',
+            'policies',
             'pvc',
             'rc',
-            'resourcequota',
+            'resourcequotas',
+            'routes',
             'services'
         ]
 
-        # nodes and pvs are not namespaced, must pull separately.
-        # Also collect master metrics
+        # these are not namespaced, must pull separately.
+        global_resources = [
+            'namespaces',
+            'nodes',
+            'projects',
+            'pvs'
+        ]
         self.add_cmd_output([
-            "{} get -o json nodes".format(kube_cmd),
-            "{} get -o json pv".format(kube_cmd),
-            "{} get --raw /metrics".format(kube_cmd)
+            "%s get %s" % (kube_cmd, res) for res in global_resources
         ])
+        # Also collect master metrics
+        self.add_cmd_output("%s get --raw /metrics" % kube_cmd)
+
+        # CNV is not part of the base installation, but can be added
+        if self.is_installed('kubevirt-virtctl'):
+            resources.extend(['vms', 'vmis'])
+            self.add_cmd_output('virtctl version')
 
         for n in knsps:
             knsp = '--namespace=%s' % n
@@ -98,19 +114,19 @@ class kubernetes(Plugin, RedHatPlugin):
                 for res in resources:
                     self.add_cmd_output('%s %s' % (k_cmd, res))
 
-                if self.get_option('describe'):
-                    # need to drop json formatting for this
-                    k_cmd = '%s get %s' % (kube_cmd, knsp)
-                    for res in resources:
-                        r = self.get_command_output(
-                            '%s %s' % (k_cmd, res))
-                        if r['status'] == 0:
-                            k_list = [k.split()[0] for k in
-                                      r['output'].splitlines()[1:]]
-                            for k in k_list:
-                                k_cmd = '%s %s' % (kube_cmd, knsp)
-                                self.add_cmd_output(
-                                    '%s describe %s %s' % (k_cmd, res, k))
+            if self.get_option('describe'):
+                # need to drop json formatting for this
+                k_cmd = '%s %s' % (kube_cmd, knsp)
+                for res in resources:
+                    r = self.get_command_output(
+                        '%s get %s' % (k_cmd, res))
+                    if r['status'] == 0:
+                        k_list = [k.split()[0] for k in
+                                  r['output'].splitlines()[1:]]
+                        for k in k_list:
+                            k_cmd = '%s %s' % (kube_cmd, knsp)
+                            self.add_cmd_output(
+                                '%s describe %s %s' % (k_cmd, res, k))
 
             if self.get_option('podlogs'):
                 k_cmd = '%s %s' % (kube_cmd, knsp)

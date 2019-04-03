@@ -23,9 +23,7 @@ import logging
 
 from argparse import ArgumentParser, Action
 from sos.plugins import import_plugin
-from sos.utilities import ImporterHelper
-from stat import ST_UID, ST_GID, ST_MODE, ST_CTIME, ST_ATIME, ST_MTIME, S_IMODE
-from time import strftime, localtime
+from sos.utilities import ImporterHelper, SoSTimeoutError
 from shutil import rmtree
 import tempfile
 import hashlib
@@ -34,7 +32,7 @@ import pdb
 
 from sos import _sos as _
 from sos import __version__
-from sos import _arg_names, _arg_defaults, SoSOptions
+from sos import _arg_defaults, SoSOptions
 import sos.policies
 from sos.archive import TarFileArchive
 from sos.reporting import (Report, Section, Command, CopiedFile, CreatedFile,
@@ -43,12 +41,6 @@ from sos.reporting import (Report, Section, Command, CopiedFile, CreatedFile,
 # PYCOMPAT
 import six
 from six.moves import zip, input
-from six import print_
-
-if six.PY3:
-    from configparser import ConfigParser, ParsingError, Error
-else:
-    from ConfigParser import ConfigParser, ParsingError, Error
 
 # file system errors that should terminate a run
 fatal_fs_errors = (errno.ENOSPC, errno.EROFS)
@@ -110,99 +102,12 @@ class SosListOption(Action):
         setattr(namespace, self.dest, items)
 
 
-class XmlReport(object):
-
-    """ Report build class """
-
-    def __init__(self):
-        try:
-            import libxml2
-        except ImportError:
-            self.enabled = False
-            return
-        else:
-            self.enabled = False
-            return
-        self.doc = libxml2.newDoc("1.0")
-        self.root = self.doc.newChild(None, "sos", None)
-        self.commands = self.root.newChild(None, "commands", None)
-        self.files = self.root.newChild(None, "files", None)
-
-    def add_command(self, cmdline, exitcode, stdout=None, stderr=None,
-                    f_stdout=None, f_stderr=None, runtime=None):
-        """ Appends command run into report """
-        if not self.enabled:
-            return
-
-        cmd = self.commands.newChild(None, "cmd", None)
-
-        cmd.setNsProp(None, "cmdline", cmdline)
-
-        cmdchild = cmd.newChild(None, "exitcode", str(exitcode))
-
-        if runtime:
-            cmd.newChild(None, "runtime", str(runtime))
-
-        if stdout or f_stdout:
-            cmdchild = cmd.newChild(None, "stdout", stdout)
-            if f_stdout:
-                cmdchild.setNsProp(None, "file", f_stdout)
-
-        if stderr or f_stderr:
-            cmdchild = cmd.newChild(None, "stderr", stderr)
-            if f_stderr:
-                cmdchild.setNsProp(None, "file", f_stderr)
-
-    def add_file(self, fname, stats):
-        """ Appends file(s) added to report """
-        if not self.enabled:
-            return
-
-        cfile = self.files.newChild(None, "file", None)
-
-        cfile.setNsProp(None, "fname", fname)
-
-        cchild = cfile.newChild(None, "uid", str(stats[ST_UID]))
-        cchild = cfile.newChild(None, "gid", str(stats[ST_GID]))
-        cfile.newChild(None, "mode", str(oct(S_IMODE(stats[ST_MODE]))))
-        cchild = cfile.newChild(None, "ctime",
-                                strftime('%a %b %d %H:%M:%S %Y',
-                                         localtime(stats[ST_CTIME])))
-        cchild.setNsProp(None, "tstamp", str(stats[ST_CTIME]))
-        cchild = cfile.newChild(None, "atime",
-                                strftime('%a %b %d %H:%M:%S %Y',
-                                         localtime(stats[ST_ATIME])))
-        cchild.setNsProp(None, "tstamp", str(stats[ST_ATIME]))
-        cchild = cfile.newChild(None, "mtime",
-                                strftime('%a %b %d %H:%M:%S %Y',
-                                         localtime(stats[ST_MTIME])))
-        cchild.setNsProp(None, "tstamp", str(stats[ST_MTIME]))
-
-    def serialize(self):
-        """ Serializes xml """
-        if not self.enabled:
-            return
-
-        self.ui_log.info(self.doc.serialize(None,  1))
-
-    def serialize_to_file(self, fname):
-        """ Serializes to file """
-        if not self.enabled:
-            return
-
-        outf = tempfile.NamedTemporaryFile()
-        outf.write(self.doc.serialize(None, 1))
-        outf.flush()
-        self.archive.add_file(outf.name, dest=fname)
-        outf.close()
-
-
 # valid modes for --chroot
 chroot_modes = ["auto", "always", "never"]
 
 
-def _parse_args(args):
-    """ Parse command line options and arguments"""
+def _get_parser():
+    """ Build ArgumentParser content"""
 
     usage_string = ("%(prog)s [options]\n\n"
                     "Some examples:\n\n"
@@ -235,14 +140,16 @@ def _parse_args(args):
                         help="chroot executed commands to SYSROOT "
                              "[auto, always, never] (default=auto)",
                         default=_arg_defaults["chroot"])
-    parser.add_argument("--config-file", action="store",
-                        dest="config_file",
+    parser.add_argument("--config-file", type=str, action="store",
+                        dest="config_file", default="/etc/sos.conf",
                         help="specify alternate configuration file")
     parser.add_argument("--debug", action="store_true", dest="debug",
                         help="enable interactive debugging using the "
                              "python debugger")
     parser.add_argument("--desc", "--description", type=str, action="store",
                         help="Description for a new preset", default="")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Run plugins but do not collect data")
     parser.add_argument("--experimental", action="store_true",
                         dest="experimental", default=False,
                         help="enable experimental plugins")
@@ -272,7 +179,7 @@ def _parse_args(args):
                         help="disable these plugins", default=[])
     parser.add_argument("--no-report", action="store_true",
                         dest="noreport",
-                        help="disable HTML/XML reporting", default=False)
+                        help="disable plaintext/HTML reporting", default=False)
     parser.add_argument("--note", type=str, action="store", default="",
                         help="Behaviour notes for new preset")
     parser.add_argument("-o", "--only-plugins", action="extend",
@@ -280,6 +187,8 @@ def _parse_args(args):
                         help="enable these plugins only", default=[])
     parser.add_argument("--preset", action="store", type=str,
                         help="A preset identifier", default="auto")
+    parser.add_argument("--plugin-timeout", default=None,
+                        help="set a timeout for all plugins")
     parser.add_argument("-p", "--profile", action="extend",
                         dest="profiles", type=str, default=[],
                         help="enable plugins used by the given profiles")
@@ -317,6 +226,7 @@ def _parse_args(args):
     preset_grp.add_argument("--del-preset", type=str, action="store",
                             help="Delete the named command line preset")
 
+    # Group to make tarball encryption (via GPG/password) exclusive
     encrypt_grp = parser.add_mutually_exclusive_group()
     encrypt_grp.add_argument("--encrypt-key",
                              help="Encrypt the final archive using a GPG "
@@ -324,7 +234,7 @@ def _parse_args(args):
     encrypt_grp.add_argument("--encrypt-pass",
                              help="Encrypt the final archive using a password")
 
-    return parser.parse_args(args)
+    return parser
 
 
 class SoSReport(object):
@@ -335,7 +245,6 @@ class SoSReport(object):
         self.loaded_plugins = []
         self.skipped_plugins = []
         self.all_options = []
-        self.xml_report = XmlReport()
         self.archive = None
         self.tempfile_util = None
         self._args = args
@@ -350,30 +259,47 @@ class SoSReport(object):
         except Exception:
             pass  # not available in java, but we don't care
 
-        cmd_args = _parse_args(args)
-        self.opts = SoSOptions.from_args(cmd_args)
-        self._set_debug()
-        self._read_config()
+        # load default options and store them in self.opts
+        parser = _get_parser()
+        self.opts = SoSOptions().from_args(parser.parse_args([]))
 
+        # remove default options now, such that by processing cmdline options
+        # we know what exact options were provided there and should not be
+        # overwritten any time further
+        # then merge these options on top of self.opts
+        # this approach is required since:
+        # - we process the more priority options first (cmdline, then config
+        #   file, then presets) - required to know cfgfile or preset
+        # - we have to apply lower prio options only on top of non-default
+        for option in parser._actions:
+            if option.default != '==SUPPRESS==':
+                option.default = None
+        cmd_opts = SoSOptions().from_args(parser.parse_args(args))
+        self.opts.merge(cmd_opts)
+
+        # load options from config.file and merge them to self.opts
+        self.fileopts = SoSOptions().from_file(parser, self.opts.config_file)
+        self.opts.merge(self.fileopts)
+        self._set_debug()
+
+        # load preset and options from it - first, identify policy for that
         try:
             self.policy = sos.policies.load(sysroot=self.opts.sysroot)
         except KeyboardInterrupt:
             self._exit(0)
-
         self._is_root = self.policy.is_root()
 
         # user specified command line preset
-        if cmd_args.preset != _arg_defaults["preset"]:
-            self.preset = self.policy.find_preset(cmd_args.preset)
+        if self.opts.preset != _arg_defaults["preset"]:
+            self.preset = self.policy.find_preset(self.opts.preset)
             if not self.preset:
-                sys.stderr.write("Unknown preset: '%s'\n" % cmd_args.preset)
+                sys.stderr.write("Unknown preset: '%s'\n" % self.opts.preset)
                 self.preset = self.policy.probe_preset()
                 self.opts.list_presets = True
-
         # --preset=auto
         if not self.preset:
             self.preset = self.policy.probe_preset()
-
+        # now merge preset options to self.opts
         self.opts.merge(self.preset.opts)
 
         # system temporary directory to use
@@ -428,9 +354,7 @@ class SoSReport(object):
             'policy': self.policy,
             'sysroot': self.sysroot,
             'verbosity': self.opts.verbosity,
-            'xmlreport': self.xml_report,
             'cmdlineopts': self.opts,
-            'config': self.config,
         }
 
     def get_temp_file(self):
@@ -484,11 +408,10 @@ class SoSReport(object):
             # device, so we call the default hook
             sys.__excepthook__(etype, eval_, etrace)
         else:
-            import pdb
             # we are NOT in interactive mode, print the exception...
             traceback.print_exception(etype, eval_, etrace, limit=2,
                                       file=sys.stdout)
-            print_()
+            six.print_()
             # ...then start the debugger in post-mortem mode.
             pdb.pm()
 
@@ -507,29 +430,11 @@ class SoSReport(object):
             (etype, val, tb) = sys.exc_info()
             # we are NOT in interactive mode, print the exception...
             traceback.print_exception(etype, val, tb, file=sys.stdout)
-            print_()
+            six.print_()
             # ...then start the debugger in post-mortem mode.
             pdb.post_mortem(tb)
         if plugname and func:
             self._log_plugin_exception(plugname, func)
-
-    def _read_config(self):
-        self.config = ConfigParser()
-        if self.opts.config_file:
-            config_file = self.opts.config_file
-        else:
-            config_file = '/etc/sos.conf'
-
-        try:
-            try:
-                with open(config_file) as f:
-                    self.config.readfp(f)
-            except (ParsingError, Error) as e:
-                raise exit('Failed to parse configuration '
-                           'file %s' % config_file)
-        except (OSError, IOError) as e:
-            raise exit('Unable to read configuration file %s '
-                       ': %s' % (config_file, e.args[1]))
 
     def _setup_logging(self):
         # main soslog
@@ -583,13 +488,6 @@ class SoSReport(object):
             self.archive.add_file(self.sos_ui_log_file,
                                   dest=os.path.join('sos_logs', 'ui.log'))
 
-    def _get_disabled_plugins(self):
-        disabled = []
-        if self.config.has_option("plugins", "disable"):
-            disabled = [plugin.strip() for plugin in
-                        self.config.get("plugins", "disable").split(',')]
-        return disabled
-
     def _is_in_profile(self, plugin_class):
         onlyplugins = self.opts.onlyplugins
         if not len(self.opts.profiles):
@@ -601,8 +499,7 @@ class SoSReport(object):
         return any([p in self.opts.profiles for p in plugin_class.profiles])
 
     def _is_skipped(self, plugin_name):
-        return (plugin_name in self.opts.noplugins or
-                plugin_name in self._get_disabled_plugins())
+        return (plugin_name in self.opts.noplugins)
 
     def _is_inactive(self, plugin_name, pluginClass):
         return (not pluginClass(self.get_commons()).check_enabled() and
@@ -725,13 +622,6 @@ class SoSReport(object):
                         parms["enabled"] = True
 
     def _set_tunables(self):
-        if self.config.has_section("tunables"):
-            if not self.opts.plugopts:
-                self.opts.plugopts = []
-
-            for opt, val in self.config.items("tunables"):
-                if not opt.split('.')[0] in self._get_disabled_plugins():
-                    self.opts.plugopts.append(opt + "=" + val)
         if self.opts.plugopts:
             opts = {}
             for opt in self.opts.plugopts:
@@ -772,8 +662,12 @@ class SoSReport(object):
                             self._exit(1)
                     del opts[plugname]
             for plugname in opts.keys():
-                self.soslog.error('unable to set option for disabled or '
-                                  'non-existing plugin (%s)' % (plugname))
+                self.soslog.error('WARNING: unable to set option for disabled '
+                                  'or non-existing plugin (%s)' % (plugname))
+            # in case we printed warnings above, visually intend them from
+            # subsequent header text
+            if opts.keys():
+                self.soslog.error('')
 
     def _check_for_unknown_plugins(self):
         import itertools
@@ -831,8 +725,12 @@ class SoSReport(object):
 
         if self.all_options:
             self.ui_log.info(_("The following plugin options are available:"))
-            self.ui_log.info("")
+            self.ui_log.info(_("\n Option 'timeout' available to all plugins -"
+                               " time in seconds to allow plugin to run, use 0"
+                               " for no timeout\n"))
             for (plug, plugname, optname, optparm) in self.all_options:
+                if optname == 'timeout':
+                    continue
                 # format option value based on its type (int or bool)
                 if type(optparm["enabled"]) == bool:
                     if optparm["enabled"] is True:
@@ -973,7 +871,7 @@ class SoSReport(object):
         logpath = os.path.join(self.logdir, plugin_err_log)
         self.soslog.error('%s "%s.%s()"' % (msg, plugin, method))
         self.soslog.error('writing traceback to %s' % logpath)
-        self.archive.add_string("%s\n" % trace, logpath)
+        self.archive.add_string("%s\n" % trace, logpath, mode='a')
 
     def prework(self):
         self.policy.pre_work()
@@ -1013,6 +911,10 @@ class SoSReport(object):
         # Log command line options
         msg = "[%s:%s] executing 'sosreport %s'"
         self.soslog.info(msg % (__name__, "setup", " ".join(self._args)))
+
+        msg = "[%s:%s] loaded options from config file: %s'"
+        self.soslog.info(msg % (__name__, "setup",
+                         " ".join(self.fileopts.to_args())))
 
         # Log active preset defaults
         preset_args = self.preset.opts.to_args()
@@ -1071,7 +973,7 @@ class SoSReport(object):
             self.plugpool = ThreadPoolExecutor(self.opts.threads)
             # Pass the plugpool its own private copy of self.pluglist
             results = self.plugpool.map(self._collect_plugin,
-                                        list(self.pluglist), chunksize=1)
+                                        list(self.pluglist))
             self.plugpool.shutdown(wait=True)
             for res in results:
                 if not res:
@@ -1089,12 +991,16 @@ class SoSReport(object):
         with ThreadPoolExecutor(1) as pool:
             try:
                 t = pool.submit(self.collect_plugin, plugin)
-                t.result(timeout=self.loaded_plugins[plugin[0]-1][1].timeout)
-                return True
+                # Re-type int 0 to NoneType, as otherwise result() will treat
+                # it as a literal 0-second timeout
+                timeout = self.loaded_plugins[plugin[0]-1][1].timeout or None
+                t.result(timeout=timeout)
             except TimeoutError:
                 self.ui_log.error("\n Plugin %s timed out\n" % plugin[1])
                 self.running_plugs.remove(plugin[1])
-                pool.shutdown(wait=False)
+                self.loaded_plugins[plugin[0]-1][1]._timeout_hit = True
+                pool._threads.clear()
+        return True
 
     def collect_plugin(self, plugin):
         try:
@@ -1134,6 +1040,10 @@ class SoSReport(object):
                 status = "\n  Finished running plugins"
             if status:
                 self.ui_progress(status)
+        except SoSTimeoutError:
+            # we already log and handle the plugin timeout in the nested thread
+            # pool this is running in, so don't do anything here.
+            pass
         except (OSError, IOError) as e:
             if e.errno in fatal_fs_errors:
                 self.ui_log.error("\n %s while collecting plugin data\n"
@@ -1151,25 +1061,6 @@ class SoSReport(object):
         if not self.opts.quiet:
             sys.stdout.write(status_line)
             sys.stdout.flush()
-
-    def report(self):
-        for plugname, plug in self.loaded_plugins:
-            for oneFile in plug.copied_files:
-                try:
-                    self.xml_report.add_file(oneFile["srcpath"],
-                                             os.stat(oneFile["srcpath"]))
-                except (OSError, IOError):
-                    pass
-        try:
-            self.xml_report.serialize_to_file(os.path.join(self.rptdir,
-                                                           "sosreport.xml"))
-        except (OSError, IOError) as e:
-            if e.errno in fatal_fs_errors:
-                self.ui_log.error("")
-                self.ui_log.error(" %s while writing report data"
-                                  % e.strerror)
-                self.ui_log.error("")
-                self._exit(1)
 
     def plain_report(self):
         report = Report()
@@ -1446,13 +1337,13 @@ class SoSReport(object):
 
             if self.opts.list_plugins:
                 self.list_plugins()
-                return True
+                raise SystemExit
             if self.opts.list_profiles:
                 self.list_profiles()
-                return True
+                raise SystemExit
             if self.opts.list_presets:
                 self.list_presets()
-                return True
+                raise SystemExit
             if self.opts.add_preset:
                 return self.add_preset(self.opts.add_preset)
             if self.opts.del_preset:
@@ -1466,7 +1357,6 @@ class SoSReport(object):
             self.setup()
             self.collect()
             if not self.opts.noreport:
-                self.report()
                 self.html_report()
                 self.plain_report()
             self.postproc()
